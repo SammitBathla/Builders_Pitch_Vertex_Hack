@@ -1,4 +1,4 @@
-"""Loads the generated dataset into SQLite, once, deterministically."""
+"""Loads the generated dataset into Postgres, once, deterministically."""
 from __future__ import annotations
 
 from backend.config import get_settings
@@ -24,13 +24,16 @@ def seed_database(force: bool = False) -> int:
     reports = generate_reports(settings.dataset_seed, settings.dataset_size)
 
     with cursor() as cur:
+        # Named placeholders (psycopg's %(name)s style — NOT sqlite3's ':name' style, and
+        # NOT auto-translated by _TranslatingCursor, which only rewrites '?').
         cur.executemany(
             """
             INSERT INTO reports
                 (report_id, drug, event, age, sex, seriousness, country, received_date,
                  narrative, is_planted_true_signal, is_planted_confounded_signal)
-            VALUES (:report_id, :drug, :event, :age, :sex, :seriousness, :country, :received_date,
-                    :narrative, :is_planted_true_signal, :is_planted_confounded_signal)
+            VALUES (%(report_id)s, %(drug)s, %(event)s, %(age)s, %(sex)s, %(seriousness)s,
+                    %(country)s, %(received_date)s, %(narrative)s,
+                    %(is_planted_true_signal)s, %(is_planted_confounded_signal)s)
             """,
             reports,
         )

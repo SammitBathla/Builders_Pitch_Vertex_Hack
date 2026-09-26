@@ -9,12 +9,15 @@ for the full specification and [TASKS.md](TASKS.md) for the build checklist.
 
 ## Architecture
 
-- **One process, one command.** FastAPI serves both the JSON API and the static frontend
-  (`frontend/`, vanilla HTML/CSS/JS — no build step).
-- **One file database.** SQLite (`data/copilot.sqlite`), no external DB server.
+- **Deployable as two independent pieces.** `frontend/` is plain static HTML/CSS/JS
+  (deployable as-is, e.g. Vercel) and `backend/` is a FastAPI app (e.g. Render). The FastAPI
+  app can also still serve the frontend itself for local single-command dev (`python run.py`)
+  — `frontend/config.js`'s `window.API_BASE` is the only thing that changes between modes.
+- **Database.** Postgres (Supabase or any Postgres) via `DATABASE_URL` — no local-file
+  fallback. See "Database" below.
 - **Vector store.** Brute-force numpy cosine similarity over locally-computed hashing
-  vectors (see "LLM provider" below), stored in SQLite — the corpus per signal (dozens of
-  cases) doesn't need FAISS/pgvector.
+  vectors (see "LLM provider" below), stored in Postgres — the corpus per signal (dozens of
+  cases) doesn't need pgvector/FAISS.
 - **LLM.** Anthropic Claude API (`claude-opus-5`), forced structured JSON-schema output for
   extraction. See "LLM provider" below for why this deviates from Assumption A6.
 
@@ -39,12 +42,34 @@ tests/           pytest — deterministic pieces + integration flow, no AWS requ
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env   # then fill in ANTHROPIC_API_KEY (see below)
+cp .env.example .env   # then fill in DATABASE_URL and ANTHROPIC_API_KEY (see below)
 python run.py           # starts on http://localhost:8000
 ```
 
-The dataset (1,000+ synthetic reports, fixed seed) is generated automatically into SQLite on
-first startup.
+The dataset (1,000+ synthetic reports, fixed seed) is generated automatically into Postgres
+on first startup (once `reports` is empty — safe to leave running, it won't re-seed).
+
+### Database: Postgres via Supabase (required — no local-file fallback)
+
+The app persists everything (reports, investigations, extractions, causality, the audit
+trail, the KB vector store, chat history) to Postgres via `DATABASE_URL`. There's no SQLite
+fallback for zero-config local dev — this was a deliberate tradeoff for a database that
+survives Render's ephemeral disk in production, at the cost of needing a real Postgres even
+locally. Any Postgres works; these instructions use Supabase's free tier since it's the
+fastest path to one:
+
+1. Create a free project at [supabase.com/dashboard](https://supabase.com/dashboard) (pick
+   any name/region/password — save the password, you'll need it in the connection string).
+2. Once it's provisioned: **Project Settings → Database → Connection string**, select
+   **"Session pooler"** (not "Direct connection" — the pooler works from IPv4-only hosts
+   like Render/Vercel, which most hosts are; direct connections require IPv6).
+3. Copy that URI, replace `[YOUR-PASSWORD]` with your actual project password, and paste it
+   into `.env` as `DATABASE_URL=postgresql://...`.
+4. `python run.py` — on first startup it creates all tables (see `SCHEMA` in
+   `backend/db.py`) and seeds the synthetic dataset automatically.
+
+The same `DATABASE_URL` also works for running the test suite against — see "Running the
+tests" below; tests use an isolated throwaway schema, never your real tables.
 
 ### LLM provider: Anthropic Claude API (deviates from Assumption A6)
 
@@ -81,19 +106,49 @@ without new calls even if credentials are later removed again.
 potentially exposed (chat logs persist) and rotate it in the Anthropic Console once you're
 done testing.
 
+## Deployment: frontend on Vercel, backend on Render
+
+**Frontend (Vercel) — deployable as-is, no React/build step needed.** It's already plain
+static HTML/CSS/JS.
+1. New Vercel project → import this GitHub repo.
+2. Project Settings → **Root Directory** → `frontend`. Framework preset: **Other**
+   (static — no build command, no install command).
+3. Deploy. Once your backend (below) is live, edit `frontend/config.js`:
+   `window.API_BASE = "https://your-backend.onrender.com";` and push — Vercel
+   auto-redeploys. Until then it defaults to `""` (same-origin), which only works when
+   FastAPI is serving the frontend itself (local dev).
+
+**Backend (Render).**
+1. New Web Service → connect this GitHub repo (this repo includes `render.yaml`, so you can
+   also use Render's "Blueprint" deploy to skip the manual steps below).
+2. Build command: `pip install -r requirements.txt`. Start command: `python run.py` — it
+   already reads Render's `$PORT`, no changes needed.
+3. Environment variables: `DATABASE_URL` (your Supabase connection string — **this is what
+   makes data survive Render's restarts/redeploys, which wipe local disk**), `ANTHROPIC_API_KEY`,
+   `ANTHROPIC_MODEL_ID=claude-opus-5`.
+4. Deploy. First request seeds the dataset into your Supabase Postgres.
+
+CORS is already wide open (`allow_origins=["*"]` in `backend/api/main.py`) so the
+Vercel-hosted frontend can call the Render backend directly — no proxy/rewrite needed.
+
 ## Running the tests
 
 ```bash
 python -m pytest tests/ -q
 ```
 
-33 tests cover: dataset reproducibility (fixed seed) and planted signals, PRR/ROR/chi-square
-determinism, causality and recommendation rule determinism, quote-verification guardrails
-(including hallucination rejection), the audit hash chain (including tamper detection), the
-extraction pipeline's schema-rejection and cache behaviour, the vector store's retrieval
-scoping, the RAG chatbot's citation verification and no-evidence fallback, and a full
-end-to-end investigation flow (extraction → causality → recommendation → override →
-sign-off) with the LLM layer mocked so none of this requires AWS credentials to verify.
+22 of 33 tests are pure logic (dataset reproducibility, PRR/ROR/chi-square determinism,
+causality/recommendation rules, quote-verification guardrails) and need nothing — no
+database, no API key. The other 11 touch the database (audit hash chain, extraction
+pipeline, vector store, RAG chatbot, the full end-to-end investigation flow) and need a
+Postgres to run against; **they skip gracefully (not fail) if `DATABASE_URL` isn't set.**
+Point `TEST_DATABASE_URL` (or just reuse `DATABASE_URL`) at any Postgres, including your
+Supabase project directly — each test runs in its own throwaway schema
+(`tests/conftest.py`'s `fresh_db` fixture) and cleans up after itself, so it's safe to point
+at the same database the app itself uses.
+
+None of the 33 tests call a real LLM — Anthropic calls are mocked throughout, so the suite
+never spends API credits.
 
 ## Demo script (~7 minutes)
 

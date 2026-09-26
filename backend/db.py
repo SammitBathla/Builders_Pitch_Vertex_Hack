@@ -1,26 +1,33 @@
-"""SQLite persistence layer. One file, no external DB server (Requirement 11.1).
+"""Postgres persistence layer (Supabase or any Postgres) — see README "Database".
 
 Schema is intentionally denormalised/explicit so every stored value can be traced back to
 which layer produced it (AI extraction vs rule vs human override) per Requirement 8.2 and
 the audit trail of Requirement 9.
+
+Query strings throughout the codebase were originally written for sqlite3's "?"
+placeholder convention. Rather than rewrite every call site, `_TranslatingCursor` below
+rewrites "?" to psycopg's "%s" transparently, so those call sites are unchanged. The one
+sqlite-specific idiom that couldn't be papered over this way was `cursor.lastrowid` (no
+Postgres equivalent) — see `backend/audit/trail.py`, which uses `RETURNING seq` instead.
 """
 from __future__ import annotations
 
-import sqlite3
 import json
+import re
 import threading
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Iterator
+
+import psycopg
+from psycopg.rows import dict_row
 
 from backend.config import get_settings
 
-# A single shared sqlite3.Connection is used across the ThreadPoolExecutor workers that
-# drive concurrent extraction/embedding (Requirement 3.5). A bare Python sqlite3 Connection
-# is not safe for unsynchronized concurrent use from multiple threads even with
-# check_same_thread=False, and the audit hash chain (Requirement 9.2) additionally requires
-# reads-then-writes of "the last hash" to be strictly serialized. This lock guards every
-# access to the connection, DB-wide.
+# A single shared connection is used across the ThreadPoolExecutor workers that drive
+# concurrent extraction/embedding (Requirement 3.5). A bare connection is not safe for
+# unsynchronized concurrent use from multiple threads, and the audit hash chain
+# (Requirement 9.2) additionally requires reads-then-writes of "the last hash" to be
+# strictly serialized. This lock guards every access to the connection, DB-wide.
 _DB_LOCK = threading.RLock()
 
 SCHEMA = """
@@ -58,7 +65,7 @@ CREATE TABLE IF NOT EXISTS investigations (
 );
 
 CREATE TABLE IF NOT EXISTS extractions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     investigation_id TEXT NOT NULL,
     report_id TEXT NOT NULL,
     model_id TEXT,
@@ -90,7 +97,7 @@ CREATE TABLE IF NOT EXISTS extraction_cache (
 );
 
 CREATE TABLE IF NOT EXISTS causality (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     investigation_id TEXT NOT NULL,
     report_id TEXT NOT NULL,
     category TEXT NOT NULL,           -- Certain|Probable|Possible|Unlikely|Unassessable
@@ -105,7 +112,7 @@ CREATE TABLE IF NOT EXISTS causality (
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
-    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    seq SERIAL PRIMARY KEY,
     event_type TEXT NOT NULL,
     investigation_id TEXT,
     payload_json TEXT NOT NULL,
@@ -132,7 +139,7 @@ CREATE TABLE IF NOT EXISTS kb_chunks (
 CREATE INDEX IF NOT EXISTS idx_kb_investigation ON kb_chunks(investigation_id, granularity);
 
 CREATE TABLE IF NOT EXISTS chat_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     investigation_id TEXT NOT NULL,
     question TEXT NOT NULL,
     retrieved_chunk_ids_json TEXT,
@@ -144,37 +151,72 @@ CREATE TABLE IF NOT EXISTS chat_log (
 );
 """
 
-
-def _connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-    return conn
+_QMARK_RE = re.compile(r"\?")
 
 
-_conn: sqlite3.Connection | None = None
+def _translate(sql: str) -> str:
+    return _QMARK_RE.sub("%s", sql)
 
 
-def get_connection() -> sqlite3.Connection:
+class _TranslatingCursor:
+    """Wraps a psycopg cursor so existing '?'-placeholder SQL (written for sqlite3) keeps
+    working unmodified against Postgres. Intentionally does NOT implement `.lastrowid`
+    (Postgres has none) — that call site (audit/trail.py) uses `RETURNING` instead."""
+
+    def __init__(self, real_cursor):
+        self._cur = real_cursor
+
+    def execute(self, sql: str, params: tuple = ()):
+        self._cur.execute(_translate(sql), params)
+        return self
+
+    def executemany(self, sql: str, seq_of_params):
+        self._cur.executemany(_translate(sql), seq_of_params)
+        return self
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchall(self):
+        return self._cur.fetchall()
+
+    def close(self):
+        self._cur.close()
+
+
+_conn: psycopg.Connection | None = None
+
+
+def _connect(database_url: str) -> psycopg.Connection:
+    return psycopg.connect(database_url, row_factory=dict_row, autocommit=False)
+
+
+def get_connection() -> psycopg.Connection:
     global _conn
     with _DB_LOCK:
         if _conn is None:
             settings = get_settings()
-            _conn = _connect(settings.sqlite_path)
-            _conn.executescript(SCHEMA)
+            if not settings.database_url:
+                raise RuntimeError(
+                    "DATABASE_URL is not set. This app persists to Postgres (Supabase or "
+                    "any Postgres) — copy a connection string into .env. See "
+                    ".env.example / README 'Database' section."
+                )
+            _conn = _connect(settings.database_url)
+            with _conn.cursor() as cur:
+                cur.execute(SCHEMA)
             _conn.commit()
         return _conn
 
 
 @contextmanager
-def cursor() -> Iterator[sqlite3.Cursor]:
+def cursor() -> Iterator[_TranslatingCursor]:
     """Guarded write handle: acquires the DB-wide lock for the duration of the block, so
     concurrent writers (e.g. extraction workers) never interleave statements on the shared
     connection, and commits atomically before releasing it."""
     with _DB_LOCK:
         conn = get_connection()
-        cur = conn.cursor()
+        cur = _TranslatingCursor(conn.cursor())
         try:
             yield cur
             conn.commit()
@@ -185,18 +227,26 @@ def cursor() -> Iterator[sqlite3.Cursor]:
             cur.close()
 
 
-def fetchone(sql: str, params: tuple = ()) -> sqlite3.Row | None:
+def fetchone(sql: str, params: tuple = ()) -> dict | None:
     with _DB_LOCK:
-        return get_connection().execute(sql, params).fetchone()
+        conn = get_connection()
+        with conn.cursor() as cur:
+            cur.execute(_translate(sql), params)
+            return cur.fetchone()
 
 
-def fetchall(sql: str, params: tuple = ()) -> list[sqlite3.Row]:
+def fetchall(sql: str, params: tuple = ()) -> list[dict]:
     with _DB_LOCK:
-        return get_connection().execute(sql, params).fetchall()
+        conn = get_connection()
+        with conn.cursor() as cur:
+            cur.execute(_translate(sql), params)
+            return cur.fetchall()
 
 
-def row_to_dict(row: sqlite3.Row) -> dict:
-    return {k: row[k] for k in row.keys()}
+def row_to_dict(row: dict) -> dict:
+    """psycopg's dict_row factory already returns plain dicts; kept as a no-op so every
+    existing call site (`row_to_dict(r)`) needs no change."""
+    return dict(row)
 
 
 def dumps(obj) -> str:

@@ -59,11 +59,12 @@ def append_event(
                 (event_type, investigation_id, payload_json, actor, model_id, prompt_version,
                  rule_version, timestamp, prev_hash, hash)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING seq
             """,
             (event_type, investigation_id, payload_json, actor, model_id, prompt_version,
              rule_version, timestamp, prev_hash, row_hash),
         )
-        seq = cur.lastrowid
+        seq = cur.fetchone()["seq"]
 
     return {
         "seq": seq, "event_type": event_type, "investigation_id": investigation_id,

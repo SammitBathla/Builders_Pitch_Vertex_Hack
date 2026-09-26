@@ -4,11 +4,11 @@ Assumption A6 originally pinned Bedrock Nova Lite; this deployment runs on the A
 Claude API instead (see README "LLM provider" section) because that's the credential
 available in this environment — the Bedrock settings are kept below, unused, in case AWS
 credentials are supplied later. Assumption A4 makes the manual-minutes-per-case figure an
-explicit, overridable, labelled assumption (Requirement 10.1).
+explicit, overridable, labelled assumption (Requirement 10.1). Persistence is Postgres
+(Supabase) via DATABASE_URL — see README "Database" section.
 """
 from __future__ import annotations
 
-from pathlib import Path
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -40,23 +40,15 @@ class Settings(BaseSettings):
     dataset_seed: int = 42
     dataset_size: int = 1000
 
-    data_dir: str = "./data"
+    # Postgres connection string (Supabase's "Session pooler" URI, or any Postgres).
+    # Required — there is no local-file fallback (see backend/db.py docstring).
+    database_url: str | None = None
 
     extraction_prompt_version: str = "extract-v1"
     causality_ruleset_version: str = "causality-v1"
     recommendation_ruleset_version: str = "recommendation-v1"
     summary_prompt_version: str = "summary-v1"
     chat_prompt_version: str = "chat-v1"
-
-    @property
-    def data_path(self) -> Path:
-        p = Path(self.data_dir)
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
-    @property
-    def sqlite_path(self) -> Path:
-        return self.data_path / "copilot.sqlite"
 
 
 @lru_cache

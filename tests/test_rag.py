@@ -1,14 +1,3 @@
-import backend.db as db_module
-from backend.config import get_settings
-
-
-def _fresh_db(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATA_DIR", str(tmp_path))
-    get_settings.cache_clear()
-    db_module._conn = None
-    db_module.get_connection()
-
-
 VOCAB = ["hepatic", "onset", "dechallenge", "kidney"]
 
 
@@ -25,8 +14,7 @@ def _seed_kb(investigation_id="INV-1"):
               0, 20, "chunk", fake_embed("onset was 3 days after starting the drug dechallenge hepatic"))
 
 
-def test_no_relevant_context_returns_no_evidence_without_llm_call(tmp_path, monkeypatch):
-    _fresh_db(tmp_path, monkeypatch)
+def test_no_relevant_context_returns_no_evidence_without_llm_call(fresh_db):
     _seed_kb()
     from backend.chatbot.rag import answer_question, NO_EVIDENCE_MESSAGE
 
@@ -42,8 +30,7 @@ def test_no_relevant_context_returns_no_evidence_without_llm_call(tmp_path, monk
     assert result.answer == NO_EVIDENCE_MESSAGE
 
 
-def test_valid_citation_is_verified_and_navigable(tmp_path, monkeypatch):
-    _fresh_db(tmp_path, monkeypatch)
+def test_valid_citation_is_verified_and_navigable(fresh_db):
     _seed_kb()
     from backend.chatbot.rag import answer_question
 
@@ -59,8 +46,7 @@ def test_valid_citation_is_verified_and_navigable(tmp_path, monkeypatch):
     assert result.citations[0]["char_start"] is not None
 
 
-def test_fabricated_citation_is_flagged_not_trusted(tmp_path, monkeypatch):
-    _fresh_db(tmp_path, monkeypatch)
+def test_fabricated_citation_is_flagged_not_trusted(fresh_db):
     _seed_kb()
     from backend.chatbot.rag import answer_question
 

@@ -1,14 +1,3 @@
-import backend.db as db_module
-from backend.config import get_settings
-
-
-def _fresh_db(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATA_DIR", str(tmp_path))
-    get_settings.cache_clear()
-    db_module._conn = None
-    db_module.get_connection()
-
-
 VOCAB = ["hepatic", "kidney", "onset", "dechallenge", "rash", "fever"]
 
 
@@ -17,8 +6,7 @@ def fake_embed(text: str) -> list[float]:
     return [float(t.count(w)) + 0.01 for w in VOCAB]
 
 
-def test_add_and_retrieve_scoped_by_case(tmp_path, monkeypatch):
-    _fresh_db(tmp_path, monkeypatch)
+def test_add_and_retrieve_scoped_by_case(fresh_db):
     from backend.kb.vectorstore import add_chunk, retrieve
 
     add_chunk("s1", "INV-1", "RPT-1", "case_summary", "hepatic failure case summary",
@@ -36,8 +24,7 @@ def test_add_and_retrieve_scoped_by_case(tmp_path, monkeypatch):
     assert "RPT-2" not in report_ids or "RPT-1" in report_ids
 
 
-def test_investigation_scoping(tmp_path, monkeypatch):
-    _fresh_db(tmp_path, monkeypatch)
+def test_investigation_scoping(fresh_db):
     from backend.kb.vectorstore import add_chunk, retrieve
 
     add_chunk("a1", "INV-A", "RPT-1", "case_summary", "hepatic case", None, None, "summary",

@@ -1,22 +1,28 @@
 # AI Signal Investigation Copilot — Build Task List
 
-Architecture: single Python process (FastAPI) serves both the JSON API and a static
-vanilla-JS frontend (no build step) so the whole app starts with one command
-(`python run.py`). Persistence is a single SQLite file. Vector store is a brute-force numpy
-cosine-similarity store over locally-computed hashing vectors. Requirement IDs refer to
+Architecture: FastAPI backend (deployable standalone, e.g. Render) + a plain static
+vanilla-JS frontend (deployable standalone, e.g. Vercel — no build step, no React), which
+FastAPI can also serve itself for single-command local dev (`python run.py`). Persistence
+is Postgres (Supabase or any Postgres) via `DATABASE_URL` — no local-file fallback (see
+README "Database"). Vector store is a brute-force numpy cosine-similarity store over
+locally-computed hashing vectors, stored in Postgres. Requirement IDs refer to
 `requirements.md`.
 
-**Status: core build complete, passing 33 automated tests, and verified live end-to-end**
-against the real Anthropic Claude API (`claude-opus-5` — see README "LLM provider" for why
-this deviates from Assumption A6's original Bedrock plan). Live results: 26-case true-signal
-investigation (Zentrivex) ran in 12.4s with 0 extraction failures, all quotes verified,
-correct causality (Certain/Probable/Possible) and recommendation ("Validated – escalate");
-23-case confounded investigation (Mirocaine) ran in 9.5s, 0 failures, correctly did NOT
-validate (fell to "Insufficient information" given the actual causality mix the model
-extracted — a legitimate rule-engine outcome, not a bug); AI summary drafting produced a
-well-cited clinical narrative with zero invalid case-ID citations; the RAG chatbot answered
-a real question with verified, click-navigable citations; the audit hash chain stayed valid
-across 216+ events including all of the above.
+**Status: core build complete, passing 33 automated tests (22 pure-logic + 11 DB-dependent,
+gracefully skipped without a DATABASE_URL), and verified live end-to-end against the real
+Anthropic Claude API** (`claude-opus-5` — see README "LLM provider" for why this deviates
+from Assumption A6's original Bedrock plan). Live results (from before the Postgres
+migration, against the then-SQLite backend — logic is unchanged, re-verify once Supabase is
+wired up): 26-case true-signal investigation (Zentrivex) ran in 12.4s with 0 extraction
+failures, all quotes verified, correct causality (Certain/Probable/Possible) and
+recommendation ("Validated – escalate"); 23-case confounded investigation (Mirocaine) ran in
+9.5s, 0 failures, correctly did NOT validate; AI summary drafting produced a well-cited
+clinical narrative with zero invalid case-ID citations; the RAG chatbot answered a real
+question with verified, click-navigable citations; the audit hash chain stayed valid across
+216+ events.
+
+**Currently migrating to Postgres (Supabase) + split deployment (Render backend / Vercel
+frontend)** — see "16. Deployment migration" below for exact status.
 
 ## 0. Scaffold — done
 - [x] Repo structure, `requirements.txt`, `.env.example`, `.gitignore`, `run.py`, `README.md`
@@ -96,19 +102,49 @@ across 216+ events including all of the above.
 - [x] Dashboard, Cases & Evidence, Recommendation & Summary, Ask the Copilot, Metrics, Audit
       Trail views; accessibility pass
 
-## 14. Tests — done (33 passing)
+## 14. Tests — done (33; 22 pure-logic + 11 DB-dependent)
 - [x] Stats, causality, recommendation, guardrails, audit chain (+tamper), extraction
       pipeline (schema rejection, cache, unreachable-LLM), vectorstore scoping, RAG citation
       verification, full end-to-end investigation flow
+- [x] `tests/conftest.py`'s `fresh_db` fixture: isolated throwaway Postgres schema per test
+      (via libpq `options=-csearch_path=...`), skips gracefully without a DATABASE_URL
 
 ## 15. Docs — done
-- [x] README: setup, LLM provider deviation (Anthropic, not Bedrock), one-command run,
-      assumptions, demo script
+- [x] README: setup, LLM provider deviation (Anthropic, not Bedrock), Database (Supabase)
+      walkthrough, Deployment (Vercel + Render), one-command local run, assumptions, demo script
+
+## 16. Deployment migration (branch: dev) — in progress
+- [x] Frontend made deployable standalone: relative asset paths, `frontend/config.js`
+      (`window.API_BASE`), FastAPI static mount moved to "/" (after all /api/* routes) with
+      html=True — local `python run.py` behaviour unchanged, verified
+- [x] `render.yaml` added for one-click Render backend deploy
+- [x] DB layer rewritten Postgres-only (`backend/db.py`): SERIAL instead of AUTOINCREMENT,
+      `_TranslatingCursor` maps existing `?`-placeholder SQL to `%s` so call sites didn't
+      need touching, `RETURNING seq` replaces `cursor.lastrowid` (audit trail — the one
+      genuinely Postgres-incompatible idiom), named placeholders in `seed.py` converted from
+      sqlite3's `:name` to psycopg's `%(name)s`
+- [x] `psycopg[binary]` added; `boto3`/AWS config kept (unused, Bedrock fallback)
+- [ ] **Blocked on a real DATABASE_URL** — no Supabase project created yet (user chose
+      Postgres-only, no SQLite fallback) and no local Postgres available (Docker daemon not
+      running in this environment). Code is written and reviewed but **not yet executed
+      against a real Postgres** — do this first once DATABASE_URL is available:
+      1. `python -m pytest tests/ -q` with `DATABASE_URL` set — expect all 33 to pass
+      2. `python run.py` — confirm dataset seeds, then re-run the same live smoke test as
+         the original Anthropic verification (create both planted-signal investigations,
+         override a case, draft a summary, ask the chatbot, verify the audit chain)
+      3. Watch dataset-seeding time (1000-row `executemany` over a network round-trip to
+         Supabase, not yet perf-tested) and per-investigation DB-write latency (~2-3 inserts
+         per case, currently unbatched/unpipelined — see note below)
+- [ ] Known perf follow-up, not yet done: `backend/db.py`'s `cursor()` could wrap writes in
+      psycopg3 pipeline mode (`conn.pipeline()`) to cut network round-trips for
+      multi-statement blocks (dataset seeding, per-investigation extraction+causality
+      inserts) — skipped for now since it's unverified without a live Postgres and the
+      `RETURNING`-immediately-after-`execute()` pattern in audit/trail.py needs checking
+      under pipelining before it ships
+- [ ] Deploy: Render backend (`render.yaml` ready) + Vercel frontend (root dir `frontend/`,
+      set `window.API_BASE` in `frontend/config.js` to the Render URL) — not yet done
 
 ## Remaining / follow-ups
 - [ ] Optional: swap the local hashing embeddings for a real embedding provider (Voyage AI,
       OpenAI, or Bedrock Titan if AWS credentials become available) for semantic retrieval
 - [ ] Optional polish: richer KB chunk browsing in the audit view
-- [ ] Two pre-swap investigations (created before the Anthropic wiring) have all-failed
-      extractions in the DB from testing without credentials — re-run those signals from
-      the dashboard to get real results; new investigations are unaffected

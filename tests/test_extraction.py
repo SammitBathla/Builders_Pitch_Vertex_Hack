@@ -1,16 +1,4 @@
-import backend.db as db_module
-from backend.config import get_settings
-
-
-def _fresh_db(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATA_DIR", str(tmp_path))
-    get_settings.cache_clear()
-    db_module._conn = None
-    db_module.get_connection()
-
-
-def test_valid_extraction_verifies_quotes_and_downgrades_bad_ones(tmp_path, monkeypatch):
-    _fresh_db(tmp_path, monkeypatch)
+def test_valid_extraction_verifies_quotes_and_downgrades_bad_ones(fresh_db, monkeypatch):
     import backend.llm.extraction as ext
 
     narrative = ("A 40-year-old female was started on Zentrivex and developed acute hepatic "
@@ -47,14 +35,16 @@ def test_valid_extraction_verifies_quotes_and_downgrades_bad_ones(tmp_path, monk
     assert record.cache_hit is False
 
     # Second call with same narrative/model/prompt should hit cache, no new "LLM call".
-    monkeypatch.setattr(ext, "_call_llm_raw", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")))
+    def boom(*a, **k):
+        raise AssertionError("should not be called")
+
+    monkeypatch.setattr(ext, "_call_llm_raw", boom)
     record2 = ext.extract_one(report)
     assert record2.cache_hit is True
     assert record2.time_to_onset_days == 3
 
 
-def test_schema_invalid_output_is_extraction_failure_not_coerced(tmp_path, monkeypatch):
-    _fresh_db(tmp_path, monkeypatch)
+def test_schema_invalid_output_is_extraction_failure_not_coerced(fresh_db, monkeypatch):
     import backend.llm.extraction as ext
 
     report = {"report_id": "RPT-00002", "drug": "Zentrivex", "event": "Acute Hepatic Failure",
@@ -71,16 +61,15 @@ def test_schema_invalid_output_is_extraction_failure_not_coerced(tmp_path, monke
     assert record.failure_reason is not None
 
 
-def test_bedrock_unreachable_is_visible_failure_not_silent(tmp_path, monkeypatch):
-    _fresh_db(tmp_path, monkeypatch)
+def test_llm_unreachable_is_visible_failure_not_silent(fresh_db, monkeypatch):
     import backend.llm.extraction as ext
-    from backend.llm.bedrock_client import BedrockUnavailableError
+    from backend.llm.errors import LLMUnavailableError
 
     report = {"report_id": "RPT-00003", "drug": "Zentrivex", "event": "Acute Hepatic Failure",
               "narrative": "Some narrative text."}
 
     def boom(*a, **k):
-        raise BedrockUnavailableError("network down")
+        raise LLMUnavailableError("network down")
 
     monkeypatch.setattr(ext, "_call_llm_raw", boom)
     record = ext.extract_one(report)

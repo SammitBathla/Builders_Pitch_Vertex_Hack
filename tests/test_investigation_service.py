@@ -1,16 +1,3 @@
-import backend.db as db_module
-from backend.config import get_settings
-
-
-def _fresh_db(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATA_DIR", str(tmp_path))
-    get_settings.cache_clear()
-    db_module._conn = None
-    db_module.get_connection()
-    from backend.data_gen.seed import seed_database
-    seed_database()
-
-
 def _fake_extract_many(reports, max_workers=12, prompt_version="extract-v1"):
     from backend.llm.extraction import ExtractionRecord
     from backend.data_gen.vocab import SIGNAL_DRUG_TRUE, SIGNAL_EVENT_TRUE
@@ -38,8 +25,10 @@ def _fake_extract_many(reports, max_workers=12, prompt_version="extract-v1"):
     return out
 
 
-def test_full_investigation_flow(tmp_path, monkeypatch):
-    _fresh_db(tmp_path, monkeypatch)
+def test_full_investigation_flow(fresh_db, monkeypatch):
+    from backend.data_gen.seed import seed_database
+    seed_database()
+
     import backend.services.investigation as svc
     from backend.data_gen.vocab import SIGNAL_DRUG_TRUE, SIGNAL_EVENT_TRUE
 
