@@ -11,24 +11,20 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from backend.audit.trail import append_event
+from backend.audit.trail import append_event, append_events_batch
 from backend.chatbot.rag import answer_question
 from backend.config import get_settings
-from backend.db import cursor, dumps, fetchall, fetchone, loads, row_to_dict
+from backend.db import cursor, dumps, fetchall, fetchone, insert_many, loads, row_to_dict
 from backend.kb.build import build_kb
 from backend.llm.extraction import extract_many
 from backend.rules.causality import CATEGORIES, CaseFacts, assign_causality
 from backend.rules.recommendation import compute_recommendation
-from backend.stats.disproportionality import compute_signal_stats, rank_flagged_signals
+from backend.stats.disproportionality import SignalStats, stats_from_contingency
 from backend.summary.draft import generate_summary_draft
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _all_reports() -> list[dict]:
-    return [row_to_dict(r) for r in fetchall("SELECT * FROM reports")]
 
 
 def _reports_for_pair(drug: str, event: str) -> list[dict]:
@@ -37,15 +33,49 @@ def _reports_for_pair(drug: str, event: str) -> list[dict]:
 
 
 # --- Signals (Requirement 2) ------------------------------------------------------------
+# These compute stats from a small SQL aggregation (a handful of result rows) rather than
+# fetching all 1000 full report rows (narrative text included) over the network just to
+# re-derive counts in Python — matters a lot against a remote Postgres.
 
 def list_flagged_signals() -> list[dict]:
-    reports = _all_reports()
-    return [s.as_dict() for s in rank_flagged_signals(reports)]
+    rows = fetchall("SELECT drug, event, COUNT(*) AS n FROM reports GROUP BY drug, event")
+    counts = {(r["drug"], r["event"]): r["n"] for r in rows}
+
+    drug_totals: dict[str, int] = {}
+    event_totals: dict[str, int] = {}
+    grand_total = 0
+    for (drug, event), n in counts.items():
+        drug_totals[drug] = drug_totals.get(drug, 0) + n
+        event_totals[event] = event_totals.get(event, 0) + n
+        grand_total += n
+
+    flagged = []
+    for (drug, event), a in counts.items():
+        b = drug_totals[drug] - a
+        c = event_totals[event] - a
+        d = grand_total - a - b - c
+        s = stats_from_contingency(drug, event, a, b, c, d)
+        if s.is_signal:
+            flagged.append(s)
+    flagged.sort(key=lambda s: (s.prr is None, -(s.prr or 0)))
+    return [s.as_dict() for s in flagged]
+
+
+def _pair_stats(drug: str, event: str) -> SignalStats:
+    row = fetchone(
+        """SELECT
+               SUM(CASE WHEN drug=? AND event=? THEN 1 ELSE 0 END) AS a,
+               SUM(CASE WHEN drug=? AND event!=? THEN 1 ELSE 0 END) AS b,
+               SUM(CASE WHEN drug!=? AND event=? THEN 1 ELSE 0 END) AS c,
+               SUM(CASE WHEN drug!=? AND event!=? THEN 1 ELSE 0 END) AS d
+           FROM reports""",
+        (drug, event, drug, event, drug, event, drug, event),
+    )
+    return stats_from_contingency(drug, event, row["a"] or 0, row["b"] or 0, row["c"] or 0, row["d"] or 0)
 
 
 def get_pair_stats(drug: str, event: str) -> dict:
-    reports = _all_reports()
-    return compute_signal_stats(reports, drug, event).as_dict()
+    return _pair_stats(drug, event).as_dict()
 
 
 # --- Investigation lifecycle (Requirements 3, 4, 5, 6, 9, 12) ---------------------------
@@ -69,8 +99,7 @@ def create_investigation(drug: str, event: str, actor: str = "system") -> dict:
     if not reports:
         raise ValueError(f"No reports found for {drug} / {event}")
 
-    all_reports = _all_reports()
-    stats = compute_signal_stats(all_reports, drug, event)
+    stats = _pair_stats(drug, event)
 
     investigation_id = f"INV-{uuid.uuid4().hex[:10]}"
     created_at = _now()
@@ -88,77 +117,91 @@ def create_investigation(drug: str, event: str, actor: str = "system") -> dict:
     records = extract_many(reports)
     ai_elapsed = time.monotonic() - t0
 
+    # Everything below is computed in memory first (no DB calls per case) so the writes can
+    # go out as a handful of batched round trips instead of ~4 per case — against a remote
+    # Postgres, round-trip count (not row count) is what dominates latency (Requirement 3.5
+    # still needs to hold: ~40 cases in well under 60s).
     extractions_by_report: dict[str, dict] = {}
     causality_by_report: dict[str, dict] = {}
+    extraction_rows = []
+    causality_rows = []
+    audit_events = []
+    created_at_now = _now()
 
-    with cursor() as cur:
-        for rec in records:
-            cur.execute(
-                """INSERT INTO extractions
-                    (investigation_id, report_id, model_id, prompt_version, schema_valid,
-                     extraction_failed, failure_reason, time_to_onset_days, onset_order,
-                     dechallenge, rechallenge, confounders_json, data_gaps_json, facts_json,
-                     quotes_verified, quotes_rejected, cache_hit, cache_key, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (investigation_id, rec.report_id, rec.model_id, rec.prompt_version,
-                 int(rec.schema_valid), int(rec.extraction_failed), rec.failure_reason,
-                 rec.time_to_onset_days, rec.onset_order, rec.dechallenge, rec.rechallenge,
-                 dumps(rec.confounders), dumps(rec.data_gaps), dumps(rec.facts),
-                 rec.quotes_verified, rec.quotes_rejected, int(rec.cache_hit), rec.cache_key, _now()),
-            )
-            append_event(
-                "extraction",
-                {"report_id": rec.report_id, "schema_valid": rec.schema_valid,
-                 "extraction_failed": rec.extraction_failed, "failure_reason": rec.failure_reason,
-                 "quotes_verified": rec.quotes_verified, "quotes_rejected": rec.quotes_rejected,
-                 "cache_hit": rec.cache_hit},
-                investigation_id=investigation_id, actor="ai",
-                model_id=rec.model_id, prompt_version=rec.prompt_version,
-            )
+    for rec in records:
+        extraction_rows.append((
+            investigation_id, rec.report_id, rec.model_id, rec.prompt_version,
+            int(rec.schema_valid), int(rec.extraction_failed), rec.failure_reason,
+            rec.time_to_onset_days, rec.onset_order, rec.dechallenge, rec.rechallenge,
+            dumps(rec.confounders), dumps(rec.data_gaps), dumps(rec.facts),
+            rec.quotes_verified, rec.quotes_rejected, int(rec.cache_hit), rec.cache_key, created_at_now,
+        ))
+        audit_events.append({
+            "event_type": "extraction",
+            "payload": {"report_id": rec.report_id, "schema_valid": rec.schema_valid,
+                        "extraction_failed": rec.extraction_failed, "failure_reason": rec.failure_reason,
+                        "quotes_verified": rec.quotes_verified, "quotes_rejected": rec.quotes_rejected,
+                        "cache_hit": rec.cache_hit},
+            "investigation_id": investigation_id, "actor": "ai",
+            "model_id": rec.model_id, "prompt_version": rec.prompt_version,
+        })
 
-            extractions_by_report[rec.report_id] = {
-                "report_id": rec.report_id, "schema_valid": rec.schema_valid,
-                "extraction_failed": rec.extraction_failed, "failure_reason": rec.failure_reason,
-                "time_to_onset_days": rec.time_to_onset_days, "onset_order": rec.onset_order,
-                "dechallenge": rec.dechallenge, "rechallenge": rec.rechallenge,
-                "confounders": rec.confounders, "data_gaps": rec.data_gaps, "facts": rec.facts,
-                "quotes_verified": rec.quotes_verified, "quotes_rejected": rec.quotes_rejected,
-                "cache_hit": rec.cache_hit, "model_id": rec.model_id, "prompt_version": rec.prompt_version,
-            }
+        extractions_by_report[rec.report_id] = {
+            "report_id": rec.report_id, "schema_valid": rec.schema_valid,
+            "extraction_failed": rec.extraction_failed, "failure_reason": rec.failure_reason,
+            "time_to_onset_days": rec.time_to_onset_days, "onset_order": rec.onset_order,
+            "dechallenge": rec.dechallenge, "rechallenge": rec.rechallenge,
+            "confounders": rec.confounders, "data_gaps": rec.data_gaps, "facts": rec.facts,
+            "quotes_verified": rec.quotes_verified, "quotes_rejected": rec.quotes_rejected,
+            "cache_hit": rec.cache_hit, "model_id": rec.model_id, "prompt_version": rec.prompt_version,
+        }
 
-            if rec.extraction_failed:
-                causality_result = None
-                category, rule_id, ruleset_version, explanation = (
-                    "Unassessable", "R0-extraction-failed", "causality-v1",
-                    f"Extraction failed for this case ({rec.failure_reason}); no verified "
-                    "facts are available to assess causality.",
-                )
-            else:
-                facts = CaseFacts(
-                    time_to_onset_days=rec.time_to_onset_days, onset_order=rec.onset_order,
-                    dechallenge=rec.dechallenge, rechallenge=rec.rechallenge,
-                    has_confounders=bool(rec.confounders),
-                )
-                causality_result = assign_causality(facts)
-                category, rule_id = causality_result.category, causality_result.rule_id
-                ruleset_version, explanation = causality_result.ruleset_version, causality_result.explanation
+        if rec.extraction_failed:
+            category, rule_id, ruleset_version, explanation = (
+                "Unassessable", "R0-extraction-failed", "causality-v1",
+                f"Extraction failed for this case ({rec.failure_reason}); no verified "
+                "facts are available to assess causality.",
+            )
+        else:
+            facts = CaseFacts(
+                time_to_onset_days=rec.time_to_onset_days, onset_order=rec.onset_order,
+                dechallenge=rec.dechallenge, rechallenge=rec.rechallenge,
+                has_confounders=bool(rec.confounders),
+            )
+            causality_result = assign_causality(facts)
+            category, rule_id = causality_result.category, causality_result.rule_id
+            ruleset_version, explanation = causality_result.ruleset_version, causality_result.explanation
 
-            cur.execute(
-                """INSERT INTO causality
-                    (investigation_id, report_id, category, source, rule_id, ruleset_version,
-                     explanation, created_at)
-                   VALUES (?, ?, ?, 'rule', ?, ?, ?, ?)""",
-                (investigation_id, rec.report_id, category, rule_id, ruleset_version, explanation, _now()),
-            )
-            append_event(
-                "rule_evaluation", {"report_id": rec.report_id, "category": category, "rule_id": rule_id},
-                investigation_id=investigation_id, actor="rule-engine", rule_version=ruleset_version,
-            )
-            causality_by_report[rec.report_id] = {
-                "category": category, "source": "rule", "rule_id": rule_id,
-                "ruleset_version": ruleset_version, "explanation": explanation,
-                "overridden_by": None, "override_reason": None,
-            }
+        causality_rows.append((
+            investigation_id, rec.report_id, category, "rule", rule_id, ruleset_version,
+            explanation, created_at_now,
+        ))
+        audit_events.append({
+            "event_type": "rule_evaluation",
+            "payload": {"report_id": rec.report_id, "category": category, "rule_id": rule_id},
+            "investigation_id": investigation_id, "actor": "rule-engine", "rule_version": ruleset_version,
+        })
+        causality_by_report[rec.report_id] = {
+            "category": category, "source": "rule", "rule_id": rule_id,
+            "ruleset_version": ruleset_version, "explanation": explanation,
+            "overridden_by": None, "override_reason": None,
+        }
+
+    insert_many(
+        "extractions",
+        ["investigation_id", "report_id", "model_id", "prompt_version", "schema_valid",
+         "extraction_failed", "failure_reason", "time_to_onset_days", "onset_order",
+         "dechallenge", "rechallenge", "confounders_json", "data_gaps_json", "facts_json",
+         "quotes_verified", "quotes_rejected", "cache_hit", "cache_key", "created_at"],
+        extraction_rows,
+    )
+    insert_many(
+        "causality",
+        ["investigation_id", "report_id", "category", "source", "rule_id", "ruleset_version",
+         "explanation", "created_at"],
+        causality_rows,
+    )
+    append_events_batch(audit_events)
 
     rec_result = compute_recommendation(stats.is_signal, [c["category"] for c in causality_by_report.values()])
     with cursor() as cur:

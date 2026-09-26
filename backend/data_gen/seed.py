@@ -3,7 +3,12 @@ from __future__ import annotations
 
 from backend.config import get_settings
 from backend.data_gen.generate import generate_reports
-from backend.db import cursor, fetchone
+from backend.db import cursor, fetchone, insert_many
+
+_COLUMNS = [
+    "report_id", "drug", "event", "age", "sex", "seriousness", "country",
+    "received_date", "narrative", "is_planted_true_signal", "is_planted_confounded_signal",
+]
 
 
 def reports_count() -> int:
@@ -23,18 +28,8 @@ def seed_database(force: bool = False) -> int:
     settings = get_settings()
     reports = generate_reports(settings.dataset_seed, settings.dataset_size)
 
-    with cursor() as cur:
-        # Named placeholders (psycopg's %(name)s style — NOT sqlite3's ':name' style, and
-        # NOT auto-translated by _TranslatingCursor, which only rewrites '?').
-        cur.executemany(
-            """
-            INSERT INTO reports
-                (report_id, drug, event, age, sex, seriousness, country, received_date,
-                 narrative, is_planted_true_signal, is_planted_confounded_signal)
-            VALUES (%(report_id)s, %(drug)s, %(event)s, %(age)s, %(sex)s, %(seriousness)s,
-                    %(country)s, %(received_date)s, %(narrative)s,
-                    %(is_planted_true_signal)s, %(is_planted_confounded_signal)s)
-            """,
-            reports,
-        )
+    # One multi-row INSERT (one round trip) instead of one INSERT per report — matters a
+    # lot against a remote Postgres; this is the dominant cost of a first-ever app startup.
+    rows = [tuple(r[c] for c in _COLUMNS) for r in reports]
+    insert_many("reports", _COLUMNS, rows)
     return len(reports)

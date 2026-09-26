@@ -243,6 +243,29 @@ def fetchall(sql: str, params: tuple = ()) -> list[dict]:
             return cur.fetchall()
 
 
+def insert_many(table: str, columns: list[str], rows: list[tuple], returning: str | None = None):
+    """One multi-row INSERT (one network round trip) instead of one INSERT per row.
+
+    Round-trip count, not row count, dominates latency against a remote Postgres (Supabase
+    et al. can easily be 100-500ms per round trip depending on region/distance) — a loop of
+    N single-row `cursor().execute()` calls costs N round trips; this costs exactly one,
+    regardless of N. Pass `returning` (e.g. "seq") to get values back in the same order as
+    `rows` (Postgres guarantees RETURNING order matches VALUES order for one INSERT).
+    """
+    if not rows:
+        return [] if returning else None
+    col_list = ", ".join(columns)
+    row_ph = "(" + ", ".join(["%s"] * len(columns)) + ")"
+    values_clause = ", ".join([row_ph] * len(rows))
+    flat_params = tuple(v for row in rows for v in row)
+    sql = f"INSERT INTO {table} ({col_list}) VALUES {values_clause}"
+    if returning:
+        sql += f" RETURNING {returning}"
+    with cursor() as cur:
+        cur.execute(sql, flat_params)
+        return cur.fetchall() if returning else None
+
+
 def row_to_dict(row: dict) -> dict:
     """psycopg's dict_row factory already returns plain dicts; kept as a no-op so every
     existing call site (`row_to_dict(r)`) needs no change."""

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from backend.db import cursor, dumps, fetchall, fetchone, loads
+from backend.db import cursor, dumps, fetchall, fetchone, insert_many, loads
 
 
 def add_chunk(
@@ -24,6 +24,25 @@ def add_chunk(
             (chunk_id, investigation_id, report_id, chunk_type, text, char_start, char_end,
              granularity, dumps(embedding)),
         )
+
+
+def add_chunks_batch(chunks: list[dict]) -> None:
+    """Same as calling add_chunk() per chunk, but one round trip for all of them —
+    matters a lot against a remote Postgres, where a KB build of ~200 chunks would
+    otherwise be ~200 sequential round trips."""
+    if not chunks:
+        return
+    rows = [
+        (c["chunk_id"], c["investigation_id"], c.get("report_id"), c["chunk_type"], c["text"],
+         c.get("char_start"), c.get("char_end"), c["granularity"], dumps(c["embedding"]))
+        for c in chunks
+    ]
+    insert_many(
+        "kb_chunks",
+        ["chunk_id", "investigation_id", "report_id", "chunk_type", "text", "char_start",
+         "char_end", "granularity", "embedding_json"],
+        rows,
+    )
 
 
 def clear_investigation_kb(investigation_id: str) -> None:

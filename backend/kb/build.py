@@ -9,7 +9,7 @@ from backend.kb.chunking import (
     build_case_summary_text, build_fact_chunk_texts, build_stat_chunk_text,
     new_chunk_id, split_narrative_sentences,
 )
-from backend.kb.vectorstore import add_chunk, clear_investigation_kb
+from backend.kb.vectorstore import add_chunks_batch, clear_investigation_kb
 from backend.llm.anthropic_client import embed_text
 
 
@@ -57,6 +57,7 @@ def build_kb(
                              "granularity": "chunk"})
 
     embedding_failures = 0
+    to_insert: list[dict] = []
 
     def embed_one(item: dict):
         try:
@@ -69,9 +70,16 @@ def build_kb(
             if embedding is None:
                 embedding_failures += 1
                 continue
-            add_chunk(
-                item["chunk_id"], investigation_id, item["report_id"], item["chunk_type"],
-                item["text"], item["char_start"], item["char_end"], item["granularity"], embedding,
-            )
+            to_insert.append({
+                "chunk_id": item["chunk_id"], "investigation_id": investigation_id,
+                "report_id": item["report_id"], "chunk_type": item["chunk_type"],
+                "text": item["text"], "char_start": item["char_start"],
+                "char_end": item["char_end"], "granularity": item["granularity"],
+                "embedding": embedding,
+            })
 
-    return {"chunks_built": len(pending) - embedding_failures, "embedding_failures": embedding_failures}
+    # One round trip for all chunks, not one per chunk — matters a lot against a remote
+    # Postgres (a ~200-chunk KB build would otherwise be ~200 sequential round trips).
+    add_chunks_batch(to_insert)
+
+    return {"chunks_built": len(to_insert), "embedding_failures": embedding_failures}

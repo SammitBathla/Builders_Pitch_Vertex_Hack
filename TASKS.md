@@ -124,23 +124,41 @@ frontend)** — see "16. Deployment migration" below for exact status.
       genuinely Postgres-incompatible idiom), named placeholders in `seed.py` converted from
       sqlite3's `:name` to psycopg's `%(name)s`
 - [x] `psycopg[binary]` added; `boto3`/AWS config kept (unused, Bedrock fallback)
-- [ ] **Blocked on a real DATABASE_URL** — no Supabase project created yet (user chose
-      Postgres-only, no SQLite fallback) and no local Postgres available (Docker daemon not
-      running in this environment). Code is written and reviewed but **not yet executed
-      against a real Postgres** — do this first once DATABASE_URL is available:
-      1. `python -m pytest tests/ -q` with `DATABASE_URL` set — expect all 33 to pass
-      2. `python run.py` — confirm dataset seeds, then re-run the same live smoke test as
-         the original Anthropic verification (create both planted-signal investigations,
-         override a case, draft a summary, ask the chatbot, verify the audit chain)
-      3. Watch dataset-seeding time (1000-row `executemany` over a network round-trip to
-         Supabase, not yet perf-tested) and per-investigation DB-write latency (~2-3 inserts
-         per case, currently unbatched/unpipelined — see note below)
-- [ ] Known perf follow-up, not yet done: `backend/db.py`'s `cursor()` could wrap writes in
-      psycopg3 pipeline mode (`conn.pipeline()`) to cut network round-trips for
-      multi-statement blocks (dataset seeding, per-investigation extraction+causality
-      inserts) — skipped for now since it's unverified without a live Postgres and the
-      `RETURNING`-immediately-after-`execute()` pattern in audit/trail.py needs checking
-      under pipelining before it ships
+- [x] **Live-verified against a real Supabase project (Postgres 17.6, ap-northeast-1)**:
+      full suite 33/33 passing twice in a row, live app running, both planted-signal
+      investigations created, override/summary/chat/sign-off/audit-chain all exercised for
+      real. Found and fixed a real bug along the way: `conftest.py`'s per-test schema
+      isolation had a malformed libpq options string (`-csearch_path=...` needed a space:
+      `-c search_path=...`), which had let one test's intentional tamper-test corrupt the
+      *real* `public.audit_log` table instead of a throwaway schema — confirmed the exact
+      residue (literal strings matching the tests' hardcoded values), truncated it, fixed
+      the fixture, re-verified clean on a second full run.
+- [x] **Fixed a real, measured perf regression**: single round-trip latency to this
+      Supabase project measured at ~465ms (region distance). Unbatched code meant
+      `create_investigation` issued ~300+ sequential round trips (one INSERT per
+      case/table/audit-event/KB-chunk) — ~140s+ of pure DB latency on top of the LLM calls.
+      Fixed by batching every multi-row write into one round trip:
+      - `backend/db.py`: new `insert_many()` (single multi-row INSERT, optional
+        `RETURNING` — Postgres preserves row order for both)
+      - `backend/audit/trail.py`: new `append_events_batch()` — computes the whole hash
+        chain in memory (still correctly sequential/tamper-evident) from one read of the
+        starting hash, then writes all events in one INSERT
+      - `backend/kb/vectorstore.py` / `kb/build.py`: `add_chunks_batch()` — one insert for
+        an entire KB build instead of one per chunk (~150-200 chunks/investigation)
+      - `backend/services/investigation.py`: `create_investigation()`'s per-case loop now
+        builds rows/events in memory first, writes them in ~4 batched round trips total
+      - `backend/stats/disproportionality.py` + `services/investigation.py`: dashboard
+        signal listing and the 2x2 table now use SQL `GROUP BY`/conditional-`SUM`
+        aggregation instead of fetching all 1000 full report rows (narrative text
+        included) just to recompute counts in Python
+      **Measured results** (same Zentrivex signal, same machine, same Supabase project):
+      `create_investigation` 26 cases: ~2.5min (est., unbatched) → **13.3s** (4.4s of which
+      is the actual Claude extraction). Dashboard `/api/signals`: 2.6s → **0.54s**. 2x2
+      table: → **0.24s**.
+- [ ] Not yet batched: the one-time 1000-row dataset seed (`data_gen/seed.py`) still uses
+      per-row `executemany` — only affects first-ever startup against an empty database, so
+      lower priority, but still slow (contributes most of the ~3min full test-suite runtime
+      against real Supabase). Same `insert_many()` fix would apply.
 - [ ] Deploy: Render backend (`render.yaml` ready) + Vercel frontend (root dir `frontend/`,
       set `window.API_BASE` in `frontend/config.js` to the Render URL) — not yet done
 

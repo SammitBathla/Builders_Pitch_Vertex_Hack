@@ -57,8 +57,14 @@ def build_contingency_table(reports: list[dict], drug: str, event: str) -> Conti
 
 def compute_signal_stats(reports: list[dict], drug: str, event: str) -> SignalStats:
     t = build_contingency_table(reports, drug, event)
-    a, b, c, d = t.a, t.b, t.c, t.d
+    return stats_from_contingency(drug, event, t.a, t.b, t.c, t.d)
 
+
+def stats_from_contingency(drug: str, event: str, a: int, b: int, c: int, d: int) -> SignalStats:
+    """Same PRR/ROR/chi-square math as `compute_signal_stats`, starting directly from
+    already-computed 2x2 counts. Lets a caller source those counts from a cheap SQL
+    aggregation (a handful of rows) instead of transferring every report row over the
+    network just to re-derive counts in Python — see services/investigation.py."""
     prr = None
     ror = None
     ror_lo = None
