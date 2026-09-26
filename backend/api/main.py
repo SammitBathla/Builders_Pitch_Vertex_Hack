@@ -158,12 +158,16 @@ def api_config():
 
 
 # --- Static frontend (Requirement 11.1) ----------------------------------------------------
-# Mounted at "/" (not "/static") and LAST, so it only catches paths no /api/* route above
-# matched. html=True serves index.html for "/" and lets asset paths in index.html stay
-# plain relative paths (styles.css, app.js, config.js) — the same file layout also deploys
-# cleanly as a standalone static site (e.g. Vercel) pointed at this frontend/ folder, with
-# frontend/config.js's window.API_BASE telling it where the separately-deployed backend is.
+# The frontend is now a Vite/React app (frontend/) — its BUILD OUTPUT (frontend/dist/) is
+# what gets served, not the source tree. Mounted at "/" and LAST, so it only catches paths
+# no /api/* route above matched. html=True serves index.html for "/".
+#
+# Local single-command dev requires one manual step first (`cd frontend && npm install &&
+# npm run build`) — this guard just means `python run.py` alone, with no frontend build,
+# serves the API only rather than crashing; the same frontend/dist/ also deploys as a
+# standalone static site (e.g. Vercel, pointed at frontend/ with Vite auto-detected),
+# with frontend/.env.production's VITE_API_BASE telling it where this backend lives.
 
-FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend"
-if FRONTEND_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+if FRONTEND_DIST.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")

@@ -9,10 +9,11 @@ for the full specification and [TASKS.md](TASKS.md) for the build checklist.
 
 ## Architecture
 
-- **Deployable as two independent pieces.** `frontend/` is plain static HTML/CSS/JS
-  (deployable as-is, e.g. Vercel) and `backend/` is a FastAPI app (e.g. Render). The FastAPI
-  app can also still serve the frontend itself for local single-command dev (`python run.py`)
-  — `frontend/config.js`'s `window.API_BASE` is the only thing that changes between modes.
+- **Deployable as two independent pieces.** `frontend/` is a React app built with Vite
+  (deployable as a static build, e.g. Vercel — auto-detected, standard build pipeline) and
+  `backend/` is a FastAPI app (e.g. Render). The FastAPI app can also serve the frontend's
+  build output itself for local single-command dev (`python run.py`, after one `npm run
+  build`) — `VITE_API_BASE` (set at build time) is the only thing that changes between modes.
 - **Database.** Postgres (Supabase or any Postgres) via `DATABASE_URL` — no local-file
   fallback. See "Database" below.
 - **Vector store.** Brute-force numpy cosine similarity over locally-computed hashing
@@ -34,7 +35,7 @@ backend/
   summary/       Requirement 7  — AI-drafted investigation summary
   services/      Orchestrates all of the above into the investigation lifecycle
   api/           FastAPI routes
-frontend/        Single-page vanilla JS UI (dashboard, cases/evidence, chat, audit)
+frontend/        React (Vite) UI — dashboard, cases/evidence, recommendation/summary, chat, audit
 tests/           pytest — deterministic pieces + integration flow, no AWS required
 ```
 
@@ -43,11 +44,27 @@ tests/           pytest — deterministic pieces + integration flow, no AWS requ
 ```bash
 pip install -r requirements.txt
 cp .env.example .env   # then fill in DATABASE_URL and ANTHROPIC_API_KEY (see below)
-python run.py           # starts on http://localhost:8000
+
+cd frontend
+npm install
+npm run build            # produces frontend/dist/, which the backend serves
+cd ..
+
+python run.py            # starts on http://localhost:8000
 ```
 
 The dataset (1,000+ synthetic reports, fixed seed) is generated automatically into Postgres
 on first startup (once `reports` is empty — safe to leave running, it won't re-seed).
+
+**Frontend development** (hot reload, instead of rebuilding on every change): run the
+backend (`python run.py`) in one terminal, then in another:
+```bash
+cd frontend
+npm run dev              # starts on http://localhost:5173, proxies /api/* to :8000
+```
+`vite.config.js`'s dev-server proxy means the app works with the same relative
+`fetch("/api/...")` calls either way — no code difference between dev and the production
+build, only *how* `/api/*` reaches the backend (Vite's proxy vs. FastAPI serving both).
 
 ### Database: Postgres via Supabase (required — no local-file fallback)
 
@@ -108,15 +125,16 @@ done testing.
 
 ## Deployment: frontend on Vercel, backend on Render
 
-**Frontend (Vercel) — deployable as-is, no React/build step needed.** It's already plain
-static HTML/CSS/JS.
+**Frontend (Vercel) — React (Vite), auto-detected.**
 1. New Vercel project → import this GitHub repo.
-2. Project Settings → **Root Directory** → `frontend`. Framework preset: **Other**
-   (static — no build command, no install command).
-3. Deploy. Once your backend (below) is live, edit `frontend/config.js`:
-   `window.API_BASE = "https://your-backend.onrender.com";` and push — Vercel
-   auto-redeploys. Until then it defaults to `""` (same-origin), which only works when
-   FastAPI is serving the frontend itself (local dev).
+2. Project Settings → **Root Directory** → `frontend`. Framework preset: Vercel
+   auto-detects **Vite** from `package.json`/`vite.config.js` — build command
+   (`npm run build`) and output directory (`dist`) are filled in automatically.
+3. Project Settings → **Environment Variables** → add `VITE_API_BASE` = your Render
+   backend's URL (e.g. `https://your-backend.onrender.com`, no trailing slash). Vite reads
+   this at *build* time, so it must be set before deploying, not edited afterward — a
+   change to it requires a redeploy, not just a page refresh.
+4. Deploy.
 
 **Backend (Render).**
 1. New Web Service → connect this GitHub repo (this repo includes `render.yaml`, so you can

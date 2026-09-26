@@ -1,8 +1,12 @@
 # AI Signal Investigation Copilot — Build Task List
 
-Architecture: FastAPI backend (deployable standalone, e.g. Render) + a plain static
-vanilla-JS frontend (deployable standalone, e.g. Vercel — no build step, no React), which
-FastAPI can also serve itself for single-command local dev (`python run.py`). Persistence
+Architecture: FastAPI backend (deployable standalone, e.g. Render) + a React (Vite) frontend
+(deployable standalone as a static build, e.g. Vercel — auto-detected build pipeline), whose
+build output FastAPI can also serve itself for single-command local dev (`python run.py`,
+after one `npm run build`). Was plain vanilla JS/HTML/CSS through the Vercel deploy attempts
+below; rewritten to React once a Vercel static-hosting config issue (Output Directory
+mismatch — CSS/JS 404ing while index.html loaded) led to trying Vercel's better-trodden
+Vite path instead of continuing to debug the "Other" framework preset. Persistence
 is Postgres (Supabase or any Postgres) via `DATABASE_URL` — no local-file fallback (see
 README "Database"). Vector store is a brute-force numpy cosine-similarity store over
 locally-computed hashing vectors, stored in Postgres. Requirement IDs refer to
@@ -114,10 +118,21 @@ frontend)** — see "16. Deployment migration" below for exact status.
       walkthrough, Deployment (Vercel + Render), one-command local run, assumptions, demo script
 
 ## 16. Deployment migration (branch: dev) — in progress
-- [x] Frontend made deployable standalone: relative asset paths, `frontend/config.js`
-      (`window.API_BASE`), FastAPI static mount moved to "/" (after all /api/* routes) with
-      html=True — local `python run.py` behaviour unchanged, verified
-- [x] `render.yaml` added for one-click Render backend deploy
+- [x] `render.yaml` added for one-click Render backend deploy (fixed once already — the
+      DATABASE_URL comment was stale, predating the Postgres migration)
+- [x] **Frontend rewritten from vanilla JS to React (Vite)** — see the architecture note
+      above for why. Full rewrite, same feature set: `frontend/src/` — `App.jsx` (routing:
+      dashboard/investigation/audit), `AppContext.jsx` (shared status-bar + aria-live
+      announcer context), `components/` (Dashboard, InvestigationView + its four tabs —
+      Cases/Summary/Chat/Metrics — CaseDetail with the same char-offset evidence
+      highlighting as before, AuditView, dialogs). `api.js` reads `VITE_API_BASE`
+      (build-time env var; empty = same-origin, for local `python run.py` mode).
+      `vite.config.js` proxies `/api/*` to `:8000` for `npm run dev` hot-reload. Backend's
+      static mount (`backend/api/main.py`) now points at `frontend/dist/` (the build
+      output) instead of `frontend/` (now source). `npm install && npm run build` verified
+      clean (0 errors, 45 modules) and served correctly by the running backend (index.html,
+      JS/CSS assets, API calls all 200) — not yet visually confirmed in an actual browser.
+- [x] Dataset seed batching done (see perf section below) — no longer a follow-up.
 - [x] DB layer rewritten Postgres-only (`backend/db.py`): SERIAL instead of AUTOINCREMENT,
       `_TranslatingCursor` maps existing `?`-placeholder SQL to `%s` so call sites didn't
       need touching, `RETURNING seq` replaces `cursor.lastrowid` (audit trail — the one
@@ -155,12 +170,14 @@ frontend)** — see "16. Deployment migration" below for exact status.
       `create_investigation` 26 cases: ~2.5min (est., unbatched) → **13.3s** (4.4s of which
       is the actual Claude extraction). Dashboard `/api/signals`: 2.6s → **0.54s**. 2x2
       table: → **0.24s**.
-- [ ] Not yet batched: the one-time 1000-row dataset seed (`data_gen/seed.py`) still uses
-      per-row `executemany` — only affects first-ever startup against an empty database, so
-      lower priority, but still slow (contributes most of the ~3min full test-suite runtime
-      against real Supabase). Same `insert_many()` fix would apply.
-- [ ] Deploy: Render backend (`render.yaml` ready) + Vercel frontend (root dir `frontend/`,
-      set `window.API_BASE` in `frontend/config.js` to the Render URL) — not yet done
+- [ ] Deploy: Render backend (`render.yaml` ready, needs `DATABASE_URL` +
+      `ANTHROPIC_API_KEY` set in Render's dashboard) + Vercel frontend (root dir
+      `frontend/`, Vite auto-detected, needs `VITE_API_BASE` set to the Render URL as a
+      *build-time* env var in Vercel's dashboard before deploying) — not yet done
+- [ ] React rewrite not yet opened in an actual browser — verified server-side only (build
+      output serves correctly, API calls succeed via curl); needs a real click-through to
+      confirm evidence highlighting, tab switching, dialogs, and chat citation navigation
+      all behave the same as the vanilla-JS version did
 
 ## Remaining / follow-ups
 - [ ] Optional: swap the local hashing embeddings for a real embedding provider (Voyage AI,
