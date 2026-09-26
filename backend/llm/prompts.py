@@ -85,6 +85,7 @@ EXTRACTION_INPUT_SCHEMA = {
                     "quote": {"type": "string", "description": "Verbatim quote from the narrative."},
                 },
                 "required": ["text", "quote"],
+                "additionalProperties": False,
             },
         },
         "data_gaps": {
@@ -100,6 +101,7 @@ EXTRACTION_INPUT_SCHEMA = {
         "dechallenge", "dechallenge_quote", "rechallenge", "rechallenge_quote",
         "confounders", "data_gaps",
     ],
+    "additionalProperties": False,
 }
 
 

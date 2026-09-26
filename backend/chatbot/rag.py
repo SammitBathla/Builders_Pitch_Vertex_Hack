@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from typing import Callable
 
 from backend.kb.vectorstore import retrieve
-from backend.llm.bedrock_client import BedrockUnavailableError, converse_text, embed_text
+from backend.llm.anthropic_client import converse_text, embed_text
+from backend.llm.errors import LLMUnavailableError
 from backend.llm.prompts import CHAT_PROMPT_VERSION, CHAT_SYSTEM_PROMPT, build_chat_user_message
 
 CITATION_RE = re.compile(r"\[([A-Za-z0-9\-]+)\]")
@@ -40,7 +41,7 @@ def answer_question(
 ) -> ChatAnswer:
     try:
         query_embedding = embed_fn(question)
-    except BedrockUnavailableError as e:
+    except LLMUnavailableError as e:
         return ChatAnswer("", [], [], model_id, CHAT_PROMPT_VERSION, False, error=str(e))
 
     retrieved = retrieve(investigation_id, query_embedding)
@@ -63,7 +64,7 @@ def answer_question(
             user_message=build_chat_user_message(question, context_for_prompt),
             model_id=model_id,
         )
-    except BedrockUnavailableError as e:
+    except LLMUnavailableError as e:
         return ChatAnswer("", [], [c["chunk_id"] for c in retrieved], model_id, CHAT_PROMPT_VERSION,
                            True, error=str(e))
 

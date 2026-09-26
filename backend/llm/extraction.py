@@ -13,7 +13,8 @@ from dataclasses import dataclass, field
 from backend.cache.extraction_cache import cache_key, get_cached, put_cached
 from backend.config import get_settings
 from backend.guardrails.verify import verify_quote
-from backend.llm.bedrock_client import BedrockUnavailableError, converse_with_tool
+from backend.llm.anthropic_client import converse_with_tool
+from backend.llm.errors import LLMUnavailableError
 from backend.llm.prompts import (
     EXTRACTION_INPUT_SCHEMA, EXTRACTION_PROMPT_VERSION, EXTRACTION_SYSTEM_PROMPT,
     EXTRACTION_TOOL_DESCRIPTION, EXTRACTION_TOOL_NAME, build_extraction_user_message,
@@ -125,7 +126,7 @@ def extract_one(report: dict, prompt_version: str = EXTRACTION_PROMPT_VERSION) -
     settings = get_settings()
     narrative = report["narrative"]
     report_id = report["report_id"]
-    key = cache_key(settings.bedrock_model_id, prompt_version, narrative)
+    key = cache_key(settings.anthropic_model_id, prompt_version, narrative)
 
     start = time.monotonic()
     cached = get_cached(key)
@@ -134,10 +135,10 @@ def extract_one(report: dict, prompt_version: str = EXTRACTION_PROMPT_VERSION) -
     if not cache_hit:
         try:
             raw = _call_llm_raw(report_id, report["drug"], report["event"], narrative)
-        except BedrockUnavailableError as e:
+        except LLMUnavailableError as e:
             elapsed = time.monotonic() - start
             return ExtractionRecord(
-                report_id=report_id, model_id=settings.bedrock_model_id, prompt_version=prompt_version,
+                report_id=report_id, model_id=settings.anthropic_model_id, prompt_version=prompt_version,
                 schema_valid=False, extraction_failed=True, failure_reason=str(e),
                 time_to_onset_days=None, onset_order="unclear", dechallenge="unknown",
                 rechallenge="unknown", confounders=[], data_gaps=[], facts=[],
@@ -152,7 +153,7 @@ def extract_one(report: dict, prompt_version: str = EXTRACTION_PROMPT_VERSION) -
     except ExtractionSchemaError as e:
         elapsed = time.monotonic() - start
         return ExtractionRecord(
-            report_id=report_id, model_id=settings.bedrock_model_id, prompt_version=prompt_version,
+            report_id=report_id, model_id=settings.anthropic_model_id, prompt_version=prompt_version,
             schema_valid=False, extraction_failed=True, failure_reason=str(e),
             time_to_onset_days=None, onset_order="unclear", dechallenge="unknown",
             rechallenge="unknown", confounders=[], data_gaps=[], facts=[],
@@ -161,13 +162,13 @@ def extract_one(report: dict, prompt_version: str = EXTRACTION_PROMPT_VERSION) -
         )
 
     if not cache_hit:
-        put_cached(key, settings.bedrock_model_id, prompt_version, raw)
+        put_cached(key, settings.anthropic_model_id, prompt_version, raw)
 
     downgraded, facts, verified, rejected = _downgrade_and_verify(narrative, parsed)
     elapsed = time.monotonic() - start
 
     return ExtractionRecord(
-        report_id=report_id, model_id=settings.bedrock_model_id, prompt_version=prompt_version,
+        report_id=report_id, model_id=settings.anthropic_model_id, prompt_version=prompt_version,
         schema_valid=True, extraction_failed=False, failure_reason=None,
         time_to_onset_days=downgraded["time_to_onset_days"], onset_order=downgraded["onset_order"],
         dechallenge=downgraded["dechallenge"], rechallenge=downgraded["rechallenge"],

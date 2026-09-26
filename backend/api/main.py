@@ -138,15 +138,22 @@ def api_config():
     s = get_settings()
     return {
         "manual_minutes_per_case": s.manual_minutes_per_case,
-        "bedrock_model_id": s.bedrock_model_id,
-        "aws_region": s.aws_region,
+        "llm_provider": s.llm_provider,
+        "anthropic_model_id": s.anthropic_model_id,
         "assumptions": [
             "A1. All data is synthetic, FAERS-style; no real patient data.",
             "A2. Drug names are fictional; event terms are MedDRA-like but not a licensed dictionary.",
             "A3. Causality rules are simplified, WHO-UMC-inspired, not a validated clinical algorithm.",
             "A4. Manual effort baseline (minutes/case) is a configurable assumption.",
             "A5. Single-user local prototype; authentication is out of scope.",
-            f"A6. LLM: Bedrock Nova Lite ({s.bedrock_model_id}, {s.aws_region}), temperature 0.",
+            f"A6. LLM: Anthropic Claude API ({s.anthropic_model_id}). Deviates from the original "
+            "Bedrock Nova Lite plan because an Anthropic key, not AWS credentials, was available "
+            "in this environment (see README). This model doesn't expose a temperature parameter "
+            "(sampling controls were removed on it); consistency instead comes from low inference "
+            "effort plus this system's own downstream verification, rules and guardrails.",
+            "A6a. Embeddings for the RAG knowledge base use a local, deterministic hashing vector "
+            "(feature hashing), not a trained embedding model — Anthropic has no embeddings "
+            "endpoint. Retrieval is keyword-driven rather than semantic; see README.",
         ],
     }
 

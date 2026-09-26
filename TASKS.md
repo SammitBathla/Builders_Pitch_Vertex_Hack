@@ -3,13 +3,20 @@
 Architecture: single Python process (FastAPI) serves both the JSON API and a static
 vanilla-JS frontend (no build step) so the whole app starts with one command
 (`python run.py`). Persistence is a single SQLite file. Vector store is a brute-force numpy
-cosine-similarity store over Bedrock Titan embeddings. Requirement IDs refer to
+cosine-similarity store over locally-computed hashing vectors. Requirement IDs refer to
 `requirements.md`.
 
-**Status: core build complete and passing 33 automated tests.** Live LLM behaviour
-(extraction/chat/summary against real Bedrock) is architecturally in place but untested
-end-to-end because no AWS credentials are configured in this environment — see README
-"AWS credentials" section. Everything else runs and was smoke-tested against a live server.
+**Status: core build complete, passing 33 automated tests, and verified live end-to-end**
+against the real Anthropic Claude API (`claude-opus-5` — see README "LLM provider" for why
+this deviates from Assumption A6's original Bedrock plan). Live results: 26-case true-signal
+investigation (Zentrivex) ran in 12.4s with 0 extraction failures, all quotes verified,
+correct causality (Certain/Probable/Possible) and recommendation ("Validated – escalate");
+23-case confounded investigation (Mirocaine) ran in 9.5s, 0 failures, correctly did NOT
+validate (fell to "Insufficient information" given the actual causality mix the model
+extracted — a legitimate rule-engine outcome, not a bug); AI summary drafting produced a
+well-cited clinical narrative with zero invalid case-ID citations; the RAG chatbot answered
+a real question with verified, click-navigable citations; the audit hash chain stayed valid
+across 216+ events including all of the above.
 
 ## 0. Scaffold — done
 - [x] Repo structure, `requirements.txt`, `.env.example`, `.gitignore`, `run.py`, `README.md`
@@ -27,13 +34,14 @@ end-to-end because no AWS credentials are configured in this environment — see
 - [x] 2x2 table, PRR, ROR + 95% CI, chi-square; Evans criteria; pure function (unit-tested)
 - [x] API: `/api/signals` (ranked by PRR), `/api/signals/table` (2x2 on request)
 
-## 3. LLM fact extraction (Req 3) + guardrails (Req 4) — done (untested live)
-- [x] Bedrock Converse client wrapper, temp 0, forced tool-use JSON schema
+## 3. LLM fact extraction (Req 3) + guardrails (Req 4) — done, verified live
+- [x] Anthropic Claude API client (`claude-opus-5`), forced JSON-schema structured output
+      (no `temperature` — the model rejects it; low inference effort used instead)
 - [x] Versioned extraction prompt; Pydantic schema validation (non-conforming = failure)
 - [x] Substring/offset verification guardrail; downgrade-to-unknown on failed verification
 - [x] Guardrail outcome recorded per extraction; concurrent extraction (ThreadPoolExecutor)
 - [x] Extraction cache keyed by hash(model+prompt_version+narrative)
-- [ ] Live timing validation against real Bedrock (~40 cases <60s) — needs AWS credentials
+- [x] Live timing validated: 26 real cases in 12.4s, 23 in 9.5s — well under the ~60s target
 
 ## 4. Evidence navigation (Req 4a) — done
 - [x] Char offsets stored per verified quote; UI scrolls+highlights via `<mark>`, no
@@ -73,13 +81,16 @@ end-to-end because no AWS credentials are configured in this environment — see
 - [x] Fixed a real SQLite thread-safety bug found during smoke testing (concurrent
       extraction workers sharing one connection unsynchronized) — see `backend/db.py`
 
-## 12. RAG chatbot (Req 12) — done (untested live)
+## 12. RAG chatbot (Req 12) — done, verified live
 - [x] KB build (case narratives/sentences, verified facts, stats) at two granularities
 - [x] Retrieval: summary vectors select cases, then chunk vectors within them
 - [x] Scoped strictly to the investigation's KB
 - [x] Citation verification against retrieved context; unverifiable citations flagged inline
 - [x] No-sufficient-context path answers "no evidence" without even calling the LLM
-- [x] Logged to audit trail; temperature 0
+- [x] Logged to audit trail
+- [x] Live-tested: a real question returned a correctly-cited, verified answer; embeddings
+      are a local hashing fallback (no Anthropic embeddings endpoint) — keyword-driven
+      retrieval, not semantic; see README
 
 ## 13. Frontend UI — done
 - [x] Dashboard, Cases & Evidence, Recommendation & Summary, Ask the Copilot, Metrics, Audit
@@ -91,10 +102,13 @@ end-to-end because no AWS credentials are configured in this environment — see
       verification, full end-to-end investigation flow
 
 ## 15. Docs — done
-- [x] README: setup, AWS credential requirement, one-command run, assumptions, demo script
+- [x] README: setup, LLM provider deviation (Anthropic, not Bedrock), one-command run,
+      assumptions, demo script
 
 ## Remaining / follow-ups
-- [ ] Validate live Bedrock behaviour once AWS credentials are supplied (extraction timing,
-      real embeddings/retrieval quality, chat/summary text quality)
-- [ ] Optional polish: replace the 2x2-table `alert()` with a proper dialog; richer KB
-      chunk browsing in the audit view
+- [ ] Optional: swap the local hashing embeddings for a real embedding provider (Voyage AI,
+      OpenAI, or Bedrock Titan if AWS credentials become available) for semantic retrieval
+- [ ] Optional polish: richer KB chunk browsing in the audit view
+- [ ] Two pre-swap investigations (created before the Anthropic wiring) have all-failed
+      extractions in the DB from testing without credentials — re-run those signals from
+      the dashboard to get real results; new investigations are unaffected

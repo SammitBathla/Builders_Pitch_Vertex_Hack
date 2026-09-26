@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from typing import Callable
 
 from backend.guardrails.verify import verify_case_ids
-from backend.llm.bedrock_client import BedrockUnavailableError, converse_text
+from backend.llm.anthropic_client import converse_text
+from backend.llm.errors import LLMUnavailableError
 from backend.llm.prompts import SUMMARY_PROMPT_VERSION, SUMMARY_SYSTEM_PROMPT, build_summary_user_message
 
 CASE_ID_RE = re.compile(r"\bRPT-\d+\b")
@@ -51,7 +52,7 @@ def generate_summary_draft(
             user_message=build_summary_user_message(context),
             model_id=model_id,
         )
-    except BedrockUnavailableError as e:
+    except LLMUnavailableError as e:
         return SummaryDraftResult("", [], [], model_id, SUMMARY_PROMPT_VERSION, error=str(e))
 
     cited = sorted(set(CASE_ID_RE.findall(text)))

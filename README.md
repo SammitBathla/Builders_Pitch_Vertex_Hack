@@ -12,16 +12,17 @@ for the full specification and [TASKS.md](TASKS.md) for the build checklist.
 - **One process, one command.** FastAPI serves both the JSON API and the static frontend
   (`frontend/`, vanilla HTML/CSS/JS — no build step).
 - **One file database.** SQLite (`data/copilot.sqlite`), no external DB server.
-- **Vector store.** Brute-force numpy cosine similarity over Bedrock Titan embeddings,
-  stored in SQLite — the corpus per signal (dozens of cases) doesn't need FAISS/pgvector.
-- **LLM.** Amazon Bedrock Nova Lite (`apac.amazon.nova-lite-v1:0`, region `ap-south-1`),
-  temperature 0, forced structured output via the Converse API's tool-use.
+- **Vector store.** Brute-force numpy cosine similarity over locally-computed hashing
+  vectors (see "LLM provider" below), stored in SQLite — the corpus per signal (dozens of
+  cases) doesn't need FAISS/pgvector.
+- **LLM.** Anthropic Claude API (`claude-opus-5`), forced structured JSON-schema output for
+  extraction. See "LLM provider" below for why this deviates from Assumption A6.
 
 ```
 backend/
   data_gen/      Requirement 1  — synthetic FAERS-style dataset generator (seeded)
   stats/         Requirement 2  — PRR / ROR / chi-square, Evans criteria (pure functions)
-  llm/           Requirement 3/4 — Bedrock client, prompts, schema validation, extraction
+  llm/           Requirement 3/4 — Anthropic client, prompts, schema validation, extraction
   guardrails/    Requirement 4  — Level 2 system guardrails (substring verification)
   rules/         Requirement 5/6 — versioned causality + recommendation rule engines
   audit/         Requirement 9  — hash-chained audit trail
@@ -38,35 +39,47 @@ tests/           pytest — deterministic pieces + integration flow, no AWS requ
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env   # then fill in AWS credentials (see below)
+cp .env.example .env   # then fill in ANTHROPIC_API_KEY (see below)
 python run.py           # starts on http://localhost:8000
 ```
 
 The dataset (1,000+ synthetic reports, fixed seed) is generated automatically into SQLite on
 first startup.
 
-### AWS credentials (required for live extraction / chat / summary)
+### LLM provider: Anthropic Claude API (deviates from Assumption A6)
 
-This prototype calls **Amazon Bedrock** (Nova Lite for text, Titan for embeddings) in
-`ap-south-1`. **No AWS credentials are configured in this environment** — you'll need to
-supply your own before extraction, the chatbot, or AI summary drafting will work against a
-real model:
+Assumption A6 in `requirements.md` originally specified Amazon Bedrock Nova Lite. **This
+deployment runs on the Anthropic Claude API instead** (`backend/llm/anthropic_client.py`,
+model `claude-opus-5`), because an Anthropic API key — not AWS credentials — was the
+credential available. Populate `ANTHROPIC_API_KEY` in `.env`. Two consequences worth
+knowing:
 
-- Either populate `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (and optionally
-  `AWS_SESSION_TOKEN`) in `.env`, or
-- Rely on the standard boto3 credential chain (`aws configure`, `~/.aws/credentials`, an
-  instance/task role, SSO, etc.) and leave those blank.
+- **No `temperature` parameter.** `claude-opus-5` rejects sampling controls entirely (a
+  400 error) — there's no dial to turn to 0. Consistency instead comes from low inference
+  effort on the high-volume extraction calls plus this system's own deterministic
+  verification, rule engines and guardrails, which is where the real reproducibility
+  guarantee always lived anyway.
+- **No embeddings endpoint.** Anthropic doesn't offer one, so the RAG knowledge base
+  (Requirement 12) uses a local, dependency-free, deterministic hashing vector
+  (`embed_text` in `anthropic_client.py`) instead of a trained semantic embedding model.
+  Retrieval is keyword-driven rather than semantic — it works well for exact-term
+  questions ("which cases had X") and less well for paraphrased ones. Swapping in a real
+  embedding provider (Voyage AI, OpenAI, Bedrock Titan) later is a one-function change.
 
-Either way, your IAM principal needs `bedrock:InvokeModel` / `bedrock:Converse` for
-`apac.amazon.nova-lite-v1:0` and `amazon.titan-embed-text-v2:0` in `ap-south-1`.
+The original Bedrock path (`backend/llm/bedrock_client.py`, AWS credentials in `.env`) is
+kept in the repo, unused, in case you want to switch back — see that file's docstring.
 
-**Without credentials, the app still runs** — signal detection, the dashboard, dataset
+**Without any credentials, the app still runs** — signal detection, the dashboard, dataset
 generation, causality rules and the audit trail all work with zero AI calls. Every
-extraction will fail loudly and visibly per case (Requirement 11.2: "IF the LLM is
-unreachable THEN fail loudly per case"), causality falls back to `Unassessable`, and the
-recommendation engine correctly reports "Insufficient information" — this is the intended
-degraded-mode behaviour, not a bug. Once cached results exist (`extraction_cache` table),
-they reload without new calls even if credentials are later removed again.
+extraction fails loudly and visibly per case (Requirement 11.2: "IF the LLM is unreachable
+THEN fail loudly per case"), causality falls back to `Unassessable`, and the recommendation
+engine correctly reports "Insufficient information" — this is the intended degraded-mode
+behaviour, not a bug. Once cached results exist (`extraction_cache` table), they reload
+without new calls even if credentials are later removed again.
+
+**If you pasted an API key into a chat session to get this working:** treat it as
+potentially exposed (chat logs persist) and rotate it in the Anthropic Console once you're
+done testing.
 
 ## Running the tests
 

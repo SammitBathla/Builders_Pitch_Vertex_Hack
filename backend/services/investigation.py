@@ -298,7 +298,7 @@ def generate_summary(investigation_id: str) -> dict:
     ]
     result = generate_summary_draft(
         inv["drug"], inv["event"], inv["stats"], inv["recommendation"], cases_light,
-        settings.bedrock_model_id,
+        settings.anthropic_model_id,
     )
     with cursor() as cur:
         cur.execute(
@@ -351,7 +351,7 @@ def sign_off(investigation_id: str, actor_name: str, final_decision: str, decisi
 
 def ask_chat(investigation_id: str, question: str, actor: str = "reviewer") -> dict:
     settings = get_settings()
-    result = answer_question(investigation_id, question, settings.bedrock_model_id)
+    result = answer_question(investigation_id, question, settings.anthropic_model_id)
     with cursor() as cur:
         cur.execute(
             """INSERT INTO chat_log

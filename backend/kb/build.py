@@ -10,7 +10,7 @@ from backend.kb.chunking import (
     new_chunk_id, split_narrative_sentences,
 )
 from backend.kb.vectorstore import add_chunk, clear_investigation_kb
-from backend.llm.bedrock_client import embed_text
+from backend.llm.anthropic_client import embed_text
 
 
 def build_kb(

@@ -1,4 +1,8 @@
-"""Thin wrapper around Amazon Bedrock (Assumption A6: Nova Lite, ap-south-1, temperature 0).
+"""Thin wrapper around Amazon Bedrock (original Assumption A6: Nova Lite, ap-south-1).
+
+NOT the active provider — this deployment runs on backend/llm/anthropic_client.py instead
+(see README "LLM provider"). Kept in case AWS credentials are supplied later; unused by
+`llm_provider="anthropic"` (the default).
 
 Uses the Converse API's toolConfig to force structured JSON output (Requirement 3.2):
 the model must call the single provided tool, whose input schema is the extraction schema,
@@ -13,9 +17,10 @@ import boto3
 from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
 
 from backend.config import get_settings
+from backend.llm.errors import LLMUnavailableError
 
 
-class BedrockUnavailableError(RuntimeError):
+class BedrockUnavailableError(LLMUnavailableError):
     """Raised whenever the LLM cannot be reached or returns something we cannot use.
     Requirement 11.2: the system must fail loudly per case, never silently."""
 
