@@ -41,8 +41,12 @@ def fresh_db(monkeypatch):
     finally:
         admin_conn.close()
 
+    # libpq's -c flag and its argument must be separate tokens ("-c search_path=...", with
+    # a space) — "-csearch_path=..." (no space) is silently not recognised, which is
+    # exactly the bug this fixture had: every "isolated" connection was actually landing in
+    # the default `public` schema all along, causing cross-test ID collisions.
     sep = "&" if "?" in base_url else "?"
-    scoped_url = f"{base_url}{sep}options=-csearch_path%3D{schema}"
+    scoped_url = f"{base_url}{sep}options=-c%20search_path%3D{schema}"
     monkeypatch.setenv("DATABASE_URL", scoped_url)
     get_settings.cache_clear()
     db_module._conn = None
