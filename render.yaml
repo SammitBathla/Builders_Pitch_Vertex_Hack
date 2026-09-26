@@ -6,6 +6,12 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: python run.py
     envVars:
+      # Required — the app has no local-file fallback and will fail to start without it.
+      # Set in the Render dashboard (or `render blueprint launch` will prompt for it):
+      # your Supabase "Session pooler" connection string. sync:false means Render asks for
+      # the value at deploy time rather than storing it in this file.
+      - key: DATABASE_URL
+        sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: ANTHROPIC_MODEL_ID
@@ -16,6 +22,3 @@ services:
         value: "42"
       - key: DATASET_SIZE
         value: "1000"
-      # DATABASE_URL: set this once the app is wired to Supabase/Postgres — see TASKS.md.
-      # Without it the app falls back to a local SQLite file, which does NOT persist
-      # across Render deploys/restarts on the free plan (ephemeral disk).
