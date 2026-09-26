@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AI Signal Investigation Copilot</title>
-<link rel="stylesheet" href="/static/styles.css">
+<link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <a class="skip-link" href="#main-content">Skip to main content</a>
@@ -144,6 +144,9 @@
   <button type="button" id="close-assumptions">Close</button>
 </dialog>
 
-<script src="/static/app.js"></script>
+<!-- config.js sets window.API_BASE — "" for same-origin (local FastAPI-served mode),
+     or the deployed backend's URL when this frontend is hosted separately (e.g. Vercel). -->
+<script src="config.js"></script>
+<script src="app.js"></script>
 </body>
 </html>

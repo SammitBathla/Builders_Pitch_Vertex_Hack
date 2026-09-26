@@ -3,7 +3,8 @@
 /* ---------- API helpers ---------- */
 
 async function api(path, opts) {
-  const res = await fetch(path, Object.assign({ headers: { "Content-Type": "application/json" } }, opts));
+  const base = window.API_BASE || "";
+  const res = await fetch(base + path, Object.assign({ headers: { "Content-Type": "application/json" } }, opts));
   if (!res.ok) {
     let detail = res.statusText;
     try { const body = await res.json(); detail = body.detail || JSON.stringify(body); } catch (e) {}

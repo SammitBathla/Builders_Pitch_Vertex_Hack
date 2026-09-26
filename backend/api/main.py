@@ -6,7 +6,6 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 
 from backend.api.schemas import (
     ChatRequest, CreateInvestigationRequest, EditSummaryRequest, OverrideRequest, SignOffRequest,
@@ -159,11 +158,12 @@ def api_config():
 
 
 # --- Static frontend (Requirement 11.1) ----------------------------------------------------
+# Mounted at "/" (not "/static") and LAST, so it only catches paths no /api/* route above
+# matched. html=True serves index.html for "/" and lets asset paths in index.html stay
+# plain relative paths (styles.css, app.js, config.js) — the same file layout also deploys
+# cleanly as a standalone static site (e.g. Vercel) pointed at this frontend/ folder, with
+# frontend/config.js's window.API_BASE telling it where the separately-deployed backend is.
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend"
 if FRONTEND_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
-
-    @app.get("/")
-    def index():
-        return FileResponse(str(FRONTEND_DIR / "index.html"))
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
